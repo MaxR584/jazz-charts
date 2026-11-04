@@ -201,33 +201,110 @@ async function findFiles(dir: string, re: RegExp): Promise<string[]> {
   return out.sort();
 }
 
+/** Staff-line spacing (pixels) that Audiveris reads best. It gives up below about 5 px. */
+export const TARGET_INTERLINE = 20;
+/** Below this original spacing, enlarged images are converted to pure black and white
+ * (tested: much better note recognition on small screenshots, no loss on larger ones). */
+const THRESHOLD_BELOW_INTERLINE = 10;
+const MAX_LONG_EDGE = 9000;
+
 /**
- * Prepare an image for OMR: auto-orient, flatten, grayscale. Audiveris wants
- * ~300 dpi scans (staff interline ≥ ~12 px); small screenshots are upscaled.
+ * Estimate the staff-line spacing ("interline") of a music image in pixels, from the
+ * darkness profile of its rows: staff lines are dark rows in evenly spaced groups of five.
+ * Returns null when no staff is found. Matches Audiveris' own measurement on our fixtures.
  */
-export async function omrImage(buf: Buffer): Promise<Buffer> {
-  const img = sharp(buf).rotate().flatten({ background: "#ffffff" }).grayscale();
-  const meta = await sharp(buf).rotate().metadata();
-  const longEdge = Math.max(meta.width ?? 0, meta.height ?? 0);
-  const target = longEdge > 0 && longEdge < 2400 ? Math.min(2, 2400 / longEdge) : 1;
-  if (target > 1.05) {
-    img.resize({ width: Math.round((meta.width ?? 0) * target), kernel: "lanczos3" });
+export async function estimateInterline(buf: Buffer): Promise<number | null> {
+  const { data, info } = await sharp(buf)
+    .rotate()
+    .flatten({ background: "#ffffff" })
+    .grayscale()
+    .normalise()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { width: w, height: h } = info;
+  if (w < 20 || h < 20) return null;
+  const profile = new Float64Array(h);
+  for (let y = 0; y < h; y++) {
+    let sum = 0;
+    const row = y * w;
+    for (let x = 0; x < w; x++) sum += 255 - data[row + x]!;
+    profile[y] = sum / (255 * w);
   }
-  return img.png().toBuffer();
+  const sorted = Array.from(profile).sort((a, b) => a - b);
+  const median = sorted[Math.floor(h / 2)]!;
+  const top = sorted[Math.floor(h * 0.995)]!;
+  const threshold = median + (top - median) * 0.35;
+  const peaks: number[] = [];
+  for (let y = 1; y < h - 1; y++) {
+    if (profile[y]! >= threshold && profile[y]! >= profile[y - 1]! && profile[y]! > profile[y + 1]!) {
+      if (peaks.length && y - peaks[peaks.length - 1]! < 2) continue;
+      peaks.push(y);
+    }
+  }
+  const spacings: number[] = [];
+  for (let i = 0; i + 4 < peaks.length; i++) {
+    const gaps = [1, 2, 3, 4].map((k) => peaks[i + k]! - peaks[i + k - 1]!);
+    const mean = gaps.reduce((a, b) => a + b, 0) / 4;
+    if (mean >= 2 && gaps.every((g) => Math.abs(g - mean) <= Math.max(1, mean * 0.2))) {
+      spacings.push(mean);
+      i += 4;
+    }
+  }
+  if (spacings.length === 0) return null;
+  spacings.sort((a, b) => a - b);
+  return spacings[Math.floor(spacings.length / 2)]!;
+}
+
+/** The interline Audiveris measured, from its "too low interline value of N pixels" warning. */
+export function reportedInterline(log: string): number | null {
+  const m = /interline value of (\d+(?:\.\d+)?) pixels/i.exec(log);
+  return m ? Number(m[1]) : null;
+}
+
+export interface OmrImage {
+  png: Buffer;
+  /** Staff-line spacing in the original image, if known. */
+  interline: number | null;
+  /** How much the original was scaled. */
+  scale: number;
 }
 
 /**
- * Second attempt for images Audiveris couldn't read: stretch contrast (faint or grey scans),
- * sharpen, and scale so a typical page is about 3200 px on the long edge (small screenshots
- * get bigger staff lines; huge photos get smaller).
+ * Prepare an image for Audiveris: auto-orient, flatten, grayscale, and scale it so the staff
+ * lines are TARGET_INTERLINE px apart. Small images are also sharpened and turned black and white.
+ * Pass `interline` to skip measuring (e.g. when Audiveris told us). Without a measurement, falls
+ * back to scaling the long edge to about 2400 px.
+ */
+export async function omrImage(buf: Buffer, interline?: number | null): Promise<OmrImage> {
+  const meta = await sharp(buf).rotate().metadata();
+  const width = meta.width ?? 0;
+  const longEdge = Math.max(width, meta.height ?? 0);
+  const il = interline ?? (await estimateInterline(buf).catch(() => null));
+  // Default sizing (long edge up to ~2400 px) was tuned on our fixtures; keep it whenever it
+  // already gives a comfortable spacing, otherwise size by the measured spacing.
+  let scale = longEdge > 0 && longEdge < 2400 ? Math.min(2, 2400 / longEdge) : 1;
+  if (il && (il * scale < 14 || il * scale > 32)) scale = Math.min(6, Math.max(0.4, TARGET_INTERLINE / il));
+  if (longEdge * scale > MAX_LONG_EDGE) scale = MAX_LONG_EDGE / longEdge;
+  let img = sharp(buf).rotate().flatten({ background: "#ffffff" }).grayscale();
+  const small = il !== null && il < THRESHOLD_BELOW_INTERLINE;
+  if (small) img = img.normalise();
+  if (Math.abs(scale - 1) > 0.05 && width > 0) img = img.resize({ width: Math.round(width * scale), kernel: "lanczos3" });
+  if (small) img = sharp(await img.sharpen({ sigma: 1 }).png().toBuffer()).threshold(170);
+  return { png: await img.png().toBuffer(), interline: il, scale };
+}
+
+/**
+ * Last attempt when no staff spacing is known: stretch contrast, sharpen, scale the long edge
+ * to about 3200 px, and convert to black and white.
  */
 export async function omrImageEnhanced(buf: Buffer): Promise<Buffer> {
   const meta = await sharp(buf).rotate().metadata();
   const longEdge = Math.max(meta.width ?? 0, meta.height ?? 0);
-  const scale = longEdge > 0 ? Math.min(3, Math.max(0.5, 3200 / longEdge)) : 1;
+  const scale = longEdge > 0 ? Math.min(4, Math.max(0.5, 3200 / longEdge)) : 1;
   let img = sharp(buf).rotate().flatten({ background: "#ffffff" }).grayscale().normalise();
   if (Math.abs(scale - 1) > 0.05) img = img.resize({ width: Math.round((meta.width ?? 0) * scale), kernel: "lanczos3" });
-  return img.sharpen({ sigma: 1 }).png().toBuffer();
+  const sharpened = await img.sharpen({ sigma: 1 }).png().toBuffer();
+  return sharp(sharpened).threshold(170).png().toBuffer();
 }
 
 export class AudiverisEngine implements ConversionEngine {
@@ -270,12 +347,15 @@ export class AudiverisEngine implements ConversionEngine {
     try {
       const out = join(dir, "out");
       let inFile: string;
+      let prepared: OmrImage | null = null;
       if (input.kind === "pdf") {
         inFile = join(dir, "score.pdf");
         await writeFile(inFile, input.original);
       } else {
         inFile = join(dir, "score.png");
-        await writeFile(inFile, await omrImage(input.original));
+        onProgress?.(0, "Measuring the staff lines");
+        prepared = await omrImage(input.original);
+        await writeFile(inFile, prepared.png);
       }
       // First pass: 0–100%, or 0–50% if a retry follows.
       let span = 100;
@@ -284,17 +364,32 @@ export class AudiverisEngine implements ConversionEngine {
       let res = await this.runner(this.bin, audiverisArgs(out, inFile), this.timeoutMs, (l) => progress.line(l));
       let mxls = await findFiles(dir, /\.mxl$/i).catch(() => [] as string[]);
       let log = res.stdout + "\n" + res.stderr;
-      if (mxls.length === 0 && input.kind === "image" && shouldRetryEnhanced(log)) {
+      if (mxls.length === 0 && prepared && shouldRetryEnhanced(log)) {
         base = 50;
         span = 50;
-        onProgress?.(50, "Couldn't find the staff; trying again with a cleaned-up image");
         await rm(out, { recursive: true, force: true });
-        await writeFile(inFile, await omrImageEnhanced(input.original));
+        // If Audiveris measured the spacing in what we sent, rescale exactly from that.
+        const seen = reportedInterline(log);
+        if (seen) {
+          onProgress?.(50, "The staff lines were too small; enlarging the image and trying again");
+          await writeFile(inFile, (await omrImage(input.original, seen / prepared.scale)).png);
+        } else {
+          onProgress?.(50, "Couldn't find the staff; trying again with a cleaned-up image");
+          await writeFile(inFile, await omrImageEnhanced(input.original));
+        }
         res = await this.runner(this.bin, audiverisArgs(out, inFile), this.timeoutMs, (l) => progress.line(l));
         mxls = await findFiles(dir, /\.mxl$/i).catch(() => [] as string[]);
         log = res.stdout + "\n" + res.stderr;
       }
       if (mxls.length === 0) {
+        const il = prepared?.interline;
+        if (il && il < 3.5) {
+          throw new EngineError(
+            "recognition_failed",
+            `This image is too small to read: its staff lines are only about ${il.toFixed(1)} pixels apart. ` +
+              "Take the screenshot zoomed in further (staff lines at least 4–5 px apart, ideally 8+), or upload the original PDF.",
+          );
+        }
         throw new EngineError("recognition_failed", explainAudiverisFailure(log, res.code));
       }
       // One .mxl per movement (book.mvt1.mxl, ...). Lead sheets are a single movement.

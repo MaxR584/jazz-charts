@@ -98,3 +98,18 @@ Problems found while building `server/`, and how each was resolved.
   - The PDF's page-2 Am7 (m12) is not OCR'd.
   - The rehearsal marks in the PNG are read as "E".
 - **Sources:** Audiveris 5.11 jar (`TesseractOCR$Constants`, `TesseractOrder$Constants`, `TextLine.getGrade`, `TextRole.guess`, `glyph.Grades$Constants`, `ChordNameInter`); Audiveris handbook, CLI `-option`: https://audiveris.github.io/audiveris/_pages/reference/advanced/cli/ ; OCR languages: https://audiveris.github.io/audiveris/_pages/install/languages/ ; Tesseract `tessedit_char_blacklist`: https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html
+
+## 15. "Too low interline value" on small screenshots
+
+- **Symptom:** Audiveris fails with `Error in export`; its log says
+  `With a too low interline value of N pixels ... the picture resolution is too low (try 300 DPI)`.
+  The app showed "The staff lines in this image are too small".
+- **Cause:** Audiveris needs staff lines at least ~5 px apart. A screenshot of a whole page at
+  screen size often has 3–6 px. The old resize (long edge to 2400 px, at most 2×) wasn't enough.
+- **Fix:** `estimateInterline()` measures the staff-line spacing from the row-darkness profile
+  (matches Audiveris' own measurement: 12 px on sample-1.png, 4 px at 500 px wide). `omrImage()`
+  scales so the spacing is ~20 px (up to 6×), and below 10 px also sharpens and converts to
+  black and white. If Audiveris still reports a too-low interline, the retry rescales from the
+  value it reported. Below 3.5 px the app says the image is too small and how to fix it.
+- **Results** (sample-1.png shrunk, notes / chords F1): 500 px wide (4 px spacing) failed → 0.78 / 0.38;
+  700 px (6 px) → 0.99 / 0.51; full size unchanged (0.991 / 0.945). 300 px (2.5 px) still fails, with a clear message.

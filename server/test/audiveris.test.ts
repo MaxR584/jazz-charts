@@ -7,7 +7,10 @@ import {
   AudiverisEngine,
   AudiverisProgress,
   droppedChordNames,
+  estimateInterline,
   explainAudiverisFailure,
+  omrImage,
+  reportedInterline,
   fixAudiverisHarmonies,
   normalizeAudiverisXml,
   promoteTitle,
@@ -306,5 +309,36 @@ describe("Audiveris progress", () => {
       new AudiverisEngine({ bin: BIN }, runner).convert(await prepareInput(fixture("sample-1.png"), "image/png")),
     ).rejects.toMatchObject({ code: "recognition_failed", message: expect.stringMatching(/couldn't find any music staff lines/) });
     expect(explainAudiverisFailure("[killed: timeout]", null)).toMatch(/took too long/);
+  });
+});
+
+describe("staff line spacing", () => {
+  it("measures the same spacing Audiveris does (12 px on the sample PNG)", async () => {
+    expect(await estimateInterline(fixture("sample-1.png"))).toBe(12);
+  });
+
+  it("measures small screenshots and finds nothing in a page without music", async () => {
+    const sharp = (await import("sharp")).default;
+    const small = await sharp(fixture("sample-1.png")).resize({ width: 500 }).png().toBuffer();
+    const il = await estimateInterline(small);
+    expect(il).toBeGreaterThan(3.5);
+    expect(il).toBeLessThan(5);
+    const blank = await sharp({ create: { width: 800, height: 600, channels: 3, background: "#fff" } }).png().toBuffer();
+    expect(await estimateInterline(blank)).toBeNull();
+  });
+
+  it("scales images so staff lines end up about 20 px apart", async () => {
+    const sharp = (await import("sharp")).default;
+    const small = await sharp(fixture("sample-1.png")).resize({ width: 500 }).png().toBuffer();
+    const prepared = await omrImage(small);
+    expect(prepared.scale).toBeGreaterThan(4);
+    const after = await estimateInterline(prepared.png);
+    expect(after).toBeGreaterThan(17);
+    expect(after).toBeLessThan(23);
+  });
+
+  it("reads the spacing from Audiveris' warning", () => {
+    expect(reportedInterline("WARN | x   With a too low interline value of 4 pixels,  either this sheet")).toBe(4);
+    expect(reportedInterline("nothing here")).toBeNull();
   });
 });
