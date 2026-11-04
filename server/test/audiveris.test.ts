@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   AUDIVERIS_CONSTANTS,
   AudiverisEngine,
+  AudiverisProgress,
   droppedChordNames,
+  explainAudiverisFailure,
   fixAudiverisHarmonies,
   normalizeAudiverisXml,
   promoteTitle,
@@ -244,5 +246,65 @@ describe("Audiveris install locations", () => {
   it("uses the vendor launcher on Linux", async () => {
     const { audiverisBinCandidates } = await import("../src/engines/audiveris.js");
     expect(audiverisBinCandidates("linux", {})[0]).toMatch(/vendor\/audiveris\/bin\/Audiveris$/);
+  });
+});
+
+const NO_STAFF_LOG = [
+  "INFO  [x]                      Book 560  | 1 sheet in /tmp/x.png",
+  "INFO  [x]            StepMonitoring 98   | LOAD",
+  "INFO  [x]            StepMonitoring 98   | GRID",
+  "WARN  [x]                 SheetStub 411  | x Too few staff filaments: 0 This sheet does not seem to contain staff lines.",
+  "WARN  [score]                       CLI 956  | Exception occurred java.lang.Exception: Error in export",
+].join("\n");
+
+describe("Audiveris progress", () => {
+  it("turns step log lines into a percentage across pages", () => {
+    const seen: [number, string][] = [];
+    const p = new AudiverisProgress((pct, stage) => seen.push([Math.round(pct), stage]));
+    p.line("INFO  [sample-1]                      Book 560  | 2 sheets in /x/sample-1.pdf");
+    p.line("INFO  [sample-1#1]            StepMonitoring 98   | LOAD");
+    p.line("INFO  [sample-1#1]            StepMonitoring 98   | TEXTS");
+    p.line("INFO  [sample-1#2]            StepMonitoring 98   | LOAD");
+    p.line("INFO  [sample-1#2]            StepMonitoring 98   | PAGE");
+    p.line("INFO  [sample-1]           PartwiseBuilder 2707 | Exporting sheet(s): [#1#2]");
+    expect(seen.map((s) => s[0])).toEqual([0, 30, 50, 98, 99]);
+    expect(seen[1]![1]).toBe("Page 1 of 2: reading chord symbols and text");
+  });
+
+  it("handles single-page logs without a sheet number", () => {
+    const seen: number[] = [];
+    const p = new AudiverisProgress((pct) => seen.push(Math.round(pct)));
+    p.line("INFO  [text]                      Book 560  | 1 sheet in /x/text.png");
+    p.line("INFO  [text]            StepMonitoring 98   | GRID");
+    expect(seen).toEqual([15]);
+  });
+
+  it("reports progress during a run and 'retries' an unreadable image once, enhanced", async () => {
+    const calls: string[][] = [];
+    let n = 0;
+    const runner: Runner = async (bin, args, t, onLine) => {
+      n++;
+      if (n === 1) {
+        calls.push(args);
+        NO_STAFF_LOG.split("\n").forEach((l) => onLine?.(l));
+        return { code: 1, stdout: NO_STAFF_LOG, stderr: "" };
+      }
+      onLine?.("INFO  [x]            StepMonitoring 98   | PAGE");
+      return fakeRunner({ "a.mxl": mxl(SCORE) }, calls)(bin, args, t);
+    };
+    const pct: number[] = [];
+    const res = await new AudiverisEngine({ bin: BIN }, runner).convert(await prepareInput(fixture("sample-1.png"), "image/png"), (p) => pct.push(p));
+    expect(n).toBe(2);
+    expect(res.musicxml).toContain("<score-partwise");
+    expect(pct).toContain(50);
+    expect(Math.max(...pct)).toBeGreaterThan(90);
+  });
+
+  it("explains a failure in plain language", async () => {
+    const runner: Runner = async () => ({ code: 1, stdout: NO_STAFF_LOG, stderr: "" });
+    await expect(
+      new AudiverisEngine({ bin: BIN }, runner).convert(await prepareInput(fixture("sample-1.png"), "image/png")),
+    ).rejects.toMatchObject({ code: "recognition_failed", message: expect.stringMatching(/couldn't find any music staff lines/) });
+    expect(explainAudiverisFailure("[killed: timeout]", null)).toMatch(/took too long/);
   });
 });

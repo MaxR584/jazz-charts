@@ -179,3 +179,17 @@ describe("API engine selection and errors", () => {
     await app.close();
   });
 });
+
+describe("progress", () => {
+  it("reports progress for a job id and 404s for unknown jobs", async () => {
+    const app = buildApp({ engines: offline });
+    const png = { filename: "sheet.png", contentType: "image/png", data: fixture("sample-1.png") };
+    const unknown = await app.inject({ method: "GET", url: "/api/progress/nope-nope-nope" });
+    expect(unknown.statusCode).toBe(404);
+    const { payload, headers } = multipart({ engine: "mock" }, png);
+    const res = await app.inject({ method: "POST", url: "/api/convert?job=test-job-123", payload, headers });
+    expect(res.statusCode).toBe(200);
+    const p = await app.inject({ method: "GET", url: "/api/progress/test-job-123" });
+    expect(p.json()).toEqual({ percent: 100, stage: "Done", done: true });
+  });
+});

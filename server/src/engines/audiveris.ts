@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { accessSync, constants, existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,7 +11,7 @@ import { validateMusicXML } from "../musicxml/validate.js";
 import type { Warning } from "../../../shared/types.js";
 import type { PreparedInput } from "../pipeline/pages.js";
 import { VENDOR_DIR } from "../paths.js";
-import { EngineError, type ConversionEngine, type EngineResult } from "./types.js";
+import { EngineError, type ConversionEngine, type EngineResult, type ProgressFn } from "./types.js";
 
 export interface AudiverisOptions {
   /** Path to the Audiveris launcher. Default: $AUDIVERIS_BIN or server/vendor/audiveris/bin/Audiveris */
@@ -25,24 +25,107 @@ export interface RunResult {
   stderr: string;
 }
 
-export type Runner = (bin: string, args: string[], timeoutMs: number) => Promise<RunResult>;
+export type Runner = (bin: string, args: string[], timeoutMs: number, onLine?: (line: string) => void) => Promise<RunResult>;
 
-const defaultRunner: Runner = (bin, args, timeoutMs) =>
+/** Runs Audiveris, streaming its log line by line (for progress) and collecting it. */
+const defaultRunner: Runner = (bin, args, timeoutMs, onLine) =>
   new Promise((resolve) => {
-    execFile(
-      bin,
-      args,
-      {
-        timeout: timeoutMs,
-        maxBuffer: 32 * 1024 * 1024,
-        env: audiverisEnv(bin),
-      },
-      (err, stdout, stderr) => {
-        const code = err ? ((err as NodeJS.ErrnoException & { code?: unknown }).code as number | undefined) ?? 1 : 0;
-        resolve({ code: typeof code === "number" ? code : 1, stdout: String(stdout), stderr: String(stderr) + (err && (err as { killed?: boolean }).killed ? "\n[killed: timeout]" : "") });
-      },
-    );
+    const out: string[] = [];
+    const err: string[] = [];
+    let killed = false;
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(bin, args, { env: audiverisEnv(bin), windowsHide: true });
+    } catch (e) {
+      return resolve({ code: 1, stdout: "", stderr: String(e) });
+    }
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill();
+    }, timeoutMs);
+    const pipe = (stream: NodeJS.ReadableStream | null, sink: string[]) => {
+      let buf = "";
+      stream?.setEncoding("utf8");
+      stream?.on("data", (chunk: string) => {
+        buf += chunk;
+        const lines = buf.split(/\r?\n/);
+        buf = lines.pop() ?? "";
+        for (const l of lines) {
+          sink.push(l);
+          onLine?.(l);
+        }
+      });
+      stream?.on("end", () => {
+        if (buf) {
+          sink.push(buf);
+          onLine?.(buf);
+        }
+      });
+    };
+    pipe(child.stdout, out);
+    pipe(child.stderr, err);
+    child.on("error", (e) => err.push(String(e)));
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? 1, stdout: out.join("\n"), stderr: err.join("\n") + (killed ? "\n[killed: timeout]" : "") });
+    });
   });
+
+/** Audiveris' processing steps per page, in order, as logged by StepMonitoring. */
+export const AUDIVERIS_STEPS = [
+  "LOAD", "BINARY", "SCALE", "GRID", "HEADERS", "STEM_SEEDS", "BEAMS", "LEDGERS", "HEADS", "STEMS",
+  "REDUCTION", "CUE_BEAMS", "TEXTS", "MEASURES", "CHORDS", "CURVES", "SYMBOLS", "LINKS", "RHYTHMS", "PAGE",
+] as const;
+
+const STAGE_LABELS: Record<string, string> = {
+  LOAD: "Loading the image", BINARY: "Cleaning up the image", SCALE: "Measuring the staff", GRID: "Finding staff lines",
+  HEADERS: "Reading clefs and key signatures", STEM_SEEDS: "Finding note stems", BEAMS: "Finding beams", LEDGERS: "Finding ledger lines",
+  HEADS: "Finding note heads", STEMS: "Connecting stems", REDUCTION: "Sorting out the notes", CUE_BEAMS: "Finding small notes",
+  TEXTS: "Reading chord symbols and text", MEASURES: "Finding bars", CHORDS: "Grouping notes", CURVES: "Finding ties and slurs",
+  SYMBOLS: "Reading symbols", LINKS: "Linking symbols to notes", RHYTHMS: "Working out rhythms", PAGE: "Finishing the page",
+};
+
+/** Tracks Audiveris' log and reports overall progress across pages. */
+export class AudiverisProgress {
+  private sheets = 1;
+  constructor(private readonly report: ProgressFn) {}
+
+  line(line: string): void {
+    const n = /\|\s*(\d+) sheets? in /.exec(line);
+    if (n) this.sheets = Math.max(1, Number(n[1]));
+    const step = /\[[^\]#]*(?:#(\d+))?\]\s+StepMonitoring\s+\d+\s*\|\s*([A-Z_]+)\s*$/.exec(line);
+    if (step) {
+      const idx = AUDIVERIS_STEPS.indexOf(step[2] as (typeof AUDIVERIS_STEPS)[number]);
+      if (idx < 0) return;
+      const sheet = Math.min(Number(step[1] ?? 1), this.sheets);
+      const percent = (((sheet - 1) * AUDIVERIS_STEPS.length + idx) / (this.sheets * AUDIVERIS_STEPS.length)) * 100;
+      const label = STAGE_LABELS[step[2]!] ?? "Recognizing";
+      this.report(percent, this.sheets > 1 ? `Page ${sheet} of ${this.sheets}: ${label.toLowerCase()}` : label);
+      return;
+    }
+    if (/Exporting sheet/.test(line)) this.report(99, "Writing MusicXML");
+  }
+}
+
+/** A plain-language explanation of why Audiveris produced nothing, from its log. */
+export function explainAudiverisFailure(log: string, code: number | null): string {
+  const tips = "Tips: use a sharp, straight-on image; zoom in so the staff lines are clearly visible (a full page should be at least about 1500 px tall); crop away everything but the music.";
+  if (/does not seem to contain staff lines|Too few staff filaments/i.test(log)) {
+    return `Audiveris couldn't find any music staff lines in this image. ${tips}`;
+  }
+  if (/interline/i.test(log) && /too (low|small)/i.test(log)) {
+    return `The staff lines in this image are too small for Audiveris to read (the resolution is too low). ${tips}`;
+  }
+  if (/OutOfMemory|too large/i.test(log)) return "The image is too large for Audiveris. Try a smaller image or fewer pages.";
+  if (/killed: timeout/.test(log)) return "Audiveris took too long and was stopped. Try a smaller image or fewer pages.";
+  const last = log.split("\n").filter((l) => /WARN|ERROR|Exception/i.test(l)).slice(-3).join(" | ");
+  return `Audiveris couldn't read music from this file (exit ${code}). ${tips}${last ? ` Details: ${last}` : ""}`;
+}
+
+/** Whether a failed run is worth retrying with an enhanced image. */
+export function shouldRetryEnhanced(log: string): boolean {
+  return /does not seem to contain staff lines|Too few staff filaments|interline|Sheet ignored|flagged as invalid/i.test(log);
+}
 
 /**
  * Environment for the Audiveris JVM: headless AWT, and TESSDATA_PREFIX pointing at
@@ -133,6 +216,20 @@ export async function omrImage(buf: Buffer): Promise<Buffer> {
   return img.png().toBuffer();
 }
 
+/**
+ * Second attempt for images Audiveris couldn't read: stretch contrast (faint or grey scans),
+ * sharpen, and scale so a typical page is about 3200 px on the long edge (small screenshots
+ * get bigger staff lines; huge photos get smaller).
+ */
+export async function omrImageEnhanced(buf: Buffer): Promise<Buffer> {
+  const meta = await sharp(buf).rotate().metadata();
+  const longEdge = Math.max(meta.width ?? 0, meta.height ?? 0);
+  const scale = longEdge > 0 ? Math.min(3, Math.max(0.5, 3200 / longEdge)) : 1;
+  let img = sharp(buf).rotate().flatten({ background: "#ffffff" }).grayscale().normalise();
+  if (Math.abs(scale - 1) > 0.05) img = img.resize({ width: Math.round((meta.width ?? 0) * scale), kernel: "lanczos3" });
+  return img.sharpen({ sigma: 1 }).png().toBuffer();
+}
+
 export class AudiverisEngine implements ConversionEngine {
   readonly name = "audiveris" as const;
   private readonly bin: string;
@@ -158,13 +255,14 @@ export class AudiverisEngine implements ConversionEngine {
   /** Audiveris starts a JVM per run (~1 GB); run one job at a time. */
   private queue: Promise<unknown> = Promise.resolve();
 
-  convert(input: PreparedInput): Promise<EngineResult> {
-    const job = this.queue.then(() => this.convertNow(input));
+  convert(input: PreparedInput, onProgress?: ProgressFn): Promise<EngineResult> {
+    onProgress?.(0, "Waiting for Audiveris");
+    const job = this.queue.then(() => this.convertNow(input, onProgress));
     this.queue = job.catch(() => undefined);
     return job;
   }
 
-  private async convertNow(input: PreparedInput): Promise<EngineResult> {
+  private async convertNow(input: PreparedInput, onProgress?: ProgressFn): Promise<EngineResult> {
     if (!this.isAvailable()) {
       throw new EngineError("engine_unavailable", `Audiveris is not installed (looked for ${this.bin}); run scripts/install-audiveris.sh`);
     }
@@ -179,14 +277,25 @@ export class AudiverisEngine implements ConversionEngine {
         inFile = join(dir, "score.png");
         await writeFile(inFile, await omrImage(input.original));
       }
-      const res = await this.runner(this.bin, audiverisArgs(out, inFile), this.timeoutMs);
-      const mxls = await findFiles(dir, /\.mxl$/i).catch(() => [] as string[]);
+      // First pass: 0–100%, or 0–50% if a retry follows.
+      let span = 100;
+      let base = 0;
+      const progress = new AudiverisProgress((p, stage) => onProgress?.(base + (p * span) / 100, stage));
+      let res = await this.runner(this.bin, audiverisArgs(out, inFile), this.timeoutMs, (l) => progress.line(l));
+      let mxls = await findFiles(dir, /\.mxl$/i).catch(() => [] as string[]);
+      let log = res.stdout + "\n" + res.stderr;
+      if (mxls.length === 0 && input.kind === "image" && shouldRetryEnhanced(log)) {
+        base = 50;
+        span = 50;
+        onProgress?.(50, "Couldn't find the staff; trying again with a cleaned-up image");
+        await rm(out, { recursive: true, force: true });
+        await writeFile(inFile, await omrImageEnhanced(input.original));
+        res = await this.runner(this.bin, audiverisArgs(out, inFile), this.timeoutMs, (l) => progress.line(l));
+        mxls = await findFiles(dir, /\.mxl$/i).catch(() => [] as string[]);
+        log = res.stdout + "\n" + res.stderr;
+      }
       if (mxls.length === 0) {
-        const log = (res.stdout + "\n" + res.stderr).split("\n").filter((l) => /WARN|ERROR|Exception|killed/i.test(l)).slice(-5).join(" | ");
-        throw new EngineError(
-          "recognition_failed",
-          `Audiveris produced no MusicXML (exit ${res.code}). ${log || "No music recognized; the image may be too small or not engraved notation."}`.trim(),
-        );
+        throw new EngineError("recognition_failed", explainAudiverisFailure(log, res.code));
       }
       // One .mxl per movement (book.mvt1.mxl, ...). Lead sheets are a single movement.
       const xml = normalizeAudiverisXml(unzipMxl(await readFile(mxls[0]!)));

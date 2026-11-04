@@ -1,5 +1,5 @@
 // Client for the conversion server (see docs/CONTRACT.md).
-import type { ApiError, ConvertResponse, EngineChoice, HealthResponse } from "../../../shared/types";
+import type { ApiError, ConvertResponse, EngineChoice, HealthResponse, ProgressResponse } from "../../../shared/types";
 
 export const ACCEPTED_UPLOAD = ["image/png", "image/jpeg", "image/webp", "application/pdf"];
 export const MAX_UPLOAD = 20 * 1024 * 1024;
@@ -67,15 +67,34 @@ export interface ConvertHandle {
   abort: () => void;
 }
 
+/** A random id the server uses to report this conversion's progress. */
+export function newJobId(): string {
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  return Array.from({ length: 4 }, () => Math.random().toString(36).slice(2, 10)).join("-");
+}
+
+/** GET /api/progress/:job. Returns null when the server has nothing (yet) for this job. */
+export async function fetchProgress(job: string): Promise<ProgressResponse | null> {
+  try {
+    const res = await fetch(`/api/progress/${encodeURIComponent(job)}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const p = (await res.json()) as ProgressResponse;
+    return typeof p?.percent === "number" ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 /** POST /api/convert with upload progress (XHR, since fetch has no upload progress). */
-export function convert(file: File, engine: EngineChoice, onUploadProgress: (fraction: number) => void): ConvertHandle {
+export function convert(file: File, engine: EngineChoice, onUploadProgress: (fraction: number) => void, job?: string): ConvertHandle {
   const xhr = new XMLHttpRequest();
   const promise = new Promise<ConvertResponse>((resolve, reject) => {
     const form = new FormData();
     const type = file.type || guessType(file.name);
     form.append("file", type && type !== file.type ? new File([file], file.name, { type }) : file, file.name);
     form.append("engine", engine);
-    xhr.open("POST", "/api/convert");
+    xhr.open("POST", job ? `/api/convert?job=${encodeURIComponent(job)}` : "/api/convert");
     xhr.responseType = "text";
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onUploadProgress(e.loaded / e.total);

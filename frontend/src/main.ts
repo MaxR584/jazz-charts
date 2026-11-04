@@ -1,6 +1,6 @@
 import "./style.css";
 import type { ConvertResponse, Engine, EngineChoice, Warning } from "../../shared/types";
-import { ApiFailure, convert, fetchHealth, guessType, validateUpload, type ConvertHandle } from "./lib/api";
+import { ApiFailure, convert, fetchHealth, fetchProgress, guessType, newJobId, validateUpload, type ConvertHandle } from "./lib/api";
 import { harmonyToText, transposeChordText } from "./lib/chords";
 import { addChord, measureChords, measureNotes, setChordText, shiftNote } from "./lib/edit";
 import { pitchToName, readPitch } from "./lib/pitch";
@@ -216,20 +216,33 @@ async function uploadForConversion(file: File): Promise<void> {
   const engine = $<HTMLSelectElement>("engine").value as EngineChoice;
   const started = performance.now();
   let phase: "upload" | "recognize" = "upload";
-  const timer = window.setInterval(() => {
-    if (phase === "recognize") {
-      const s = ((performance.now() - started) / 1000).toFixed(0);
-      setProgress(true, -1, `Recognizing music… ${s}s (this can take a minute for PDFs)`);
-    }
-  }, 500);
+  const job = newJobId();
+  let last = { percent: 0, stage: "Starting" };
+  let polling = false;
+  const timer = window.setInterval(async () => {
+    if (phase !== "recognize" || polling) return;
+    polling = true;
+    const p = await fetchProgress(job);
+    polling = false;
+    if (phase !== "recognize") return;
+    // Never move the bar backwards (e.g. a late response from an earlier poll).
+    if (p && p.percent >= last.percent) last = { percent: p.percent, stage: p.stage };
+    const s = Math.round((performance.now() - started) / 1000);
+    setProgress(true, last.percent / 100, `${last.stage}… ${Math.round(last.percent)}% · ${s}s`);
+  }, 600);
   setProgress(true, 0, `Uploading ${file.name}…`);
   $("upload-panel").classList.add("busy");
-  const handle = convert(file, engine, (f) => {
-    if (f >= 1) {
-      phase = "recognize";
-      setProgress(true, -1, "Recognizing music…");
-    } else setProgress(true, f, `Uploading ${file.name}… ${Math.round(f * 100)}%`);
-  });
+  const handle = convert(
+    file,
+    engine,
+    (f) => {
+      if (f >= 1) {
+        if (phase === "upload") setProgress(true, 0, "Starting recognition… 0%");
+        phase = "recognize";
+      } else setProgress(true, f, `Uploading ${file.name}… ${Math.round(f * 100)}%`);
+    },
+    job,
+  );
   currentUpload = handle;
   try {
     const r: ConvertResponse = await handle.promise;

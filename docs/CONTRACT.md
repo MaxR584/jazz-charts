@@ -28,9 +28,15 @@ In dev, Vite proxies `/api/*` to `http://localhost:3001`.
 - `engine` (optional): `auto` (default) | `claude` | `audiveris` | `mock`.
   `auto` = claude if `ANTHROPIC_API_KEY` is set, else audiveris if installed. Never mock (it always returns the sample); with neither, `503 engine_unavailable`.
 
+Optional query `?job=<id>` (8–64 chars of `A-Za-z0-9_-`, chosen by the client) enables progress reporting.
+
 Response `200`: `ConvertResponse` (see `shared/types.ts`).
 Errors: `4xx/5xx` with `{ "error": { "code": string, "message": string } }`.
 Codes: `unsupported_type`, `file_too_large`, `engine_unavailable`, `recognition_failed`, `internal`.
+
+### `GET /api/progress/:job`
+While a convert with `?job=<id>` runs: `ProgressResponse` `{ percent, stage, done }`.
+`404` until the server has seen the job. Kept for 10 minutes.
 
 `musicxml` is always a complete, uncompressed MusicXML 4.0 `score-partwise`
 string. The frontend treats **MusicXML as the source of truth** (Audiveris can't

@@ -1,6 +1,6 @@
 import multipart from "@fastify/multipart";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import type { ApiError, ConvertResponse, Engine, EngineChoice, HealthResponse } from "../../shared/types.js";
+import type { ApiError, ConvertResponse, Engine, EngineChoice, HealthResponse, ProgressResponse } from "../../shared/types.js";
 import { AudiverisEngine } from "./engines/audiveris.js";
 import { ClaudeEngine } from "./engines/claude.js";
 import { MockEngine } from "./engines/mock.js";
@@ -66,6 +66,22 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     return sendError(reply, 500, "internal", "Internal server error");
   });
 
+  // Conversion progress, keyed by a client-chosen job id (POST /api/convert?job=<id>).
+  const progress = new Map<string, ProgressResponse & { at: number }>();
+  const setProgress = (job: string | undefined, p: ProgressResponse) => {
+    if (!job) return;
+    const now = Date.now();
+    progress.set(job, { ...p, percent: Math.max(0, Math.min(100, Math.round(p.percent))), at: now });
+    for (const [k, v] of progress) if (now - v.at > 10 * 60_000) progress.delete(k); // forget stale jobs
+  };
+
+  app.get<{ Params: { job: string } }>("/api/progress/:job", async (req, reply) => {
+    const p = progress.get(req.params.job);
+    if (!p) return reply.code(404).send({ error: { code: "internal", message: "Unknown job" } });
+    const { at: _at, ...body } = p;
+    return body;
+  });
+
   app.get("/api/health", async (): Promise<HealthResponse> => ({
     ok: true,
     engines: {
@@ -75,7 +91,9 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     },
   }));
 
-  app.post("/api/convert", async (req, reply) => {
+  app.post<{ Querystring: { job?: string } }>("/api/convert", async (req, reply) => {
+    const job = /^[A-Za-z0-9_-]{8,64}$/.test(req.query.job ?? "") ? req.query.job : undefined;
+    setProgress(job, { percent: 0, stage: "Uploading", done: false });
     if (!req.isMultipart()) {
       return sendError(reply, 415, "unsupported_type", "Send multipart/form-data with a `file` field");
     }
@@ -113,6 +131,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
       return sendError(reply, 503, "engine_unavailable", `Engine "${choice}" is unavailable: ${why}`);
     }
 
+    setProgress(job, { percent: 2, stage: mime === "application/pdf" ? "Splitting the PDF into pages" : "Preparing the image", done: false });
     let input;
     try {
       input = await prepareInput(file, mime, { maxPages: opts.maxPages });
@@ -123,7 +142,9 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
 
     const started = performance.now();
     try {
-      const result = await engine.convert(input);
+      // Engine work maps to 5–97%; the rest is preparing and finishing.
+      const result = await engine.convert(input, (p, stage) => setProgress(job, { percent: 5 + p * 0.92, stage, done: false }));
+      setProgress(job, { percent: 100, stage: "Done", done: true });
       const warnings = [...result.warnings];
       if (input.totalPages > input.pages.length) {
         warnings.push({ measure: null, code: "other", message: `Only the first ${input.pages.length} of ${input.totalPages} pages were processed.` });
@@ -138,6 +159,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
       };
       return reply.send(body);
     } catch (e) {
+      setProgress(job, { percent: 100, stage: "Failed", done: true });
       if (e instanceof EngineError) {
         const status = e.code === "engine_unavailable" ? 503 : e.code === "recognition_failed" ? 422 : 500;
         req.log.warn({ err: e }, "engine failed");

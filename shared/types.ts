@@ -66,6 +66,15 @@ export interface ConvertResponse {
   elapsedMs: number;
 }
 
+/** GET /api/progress/:job while POST /api/convert?job=<id> is running. */
+export interface ProgressResponse {
+  /** 0–100. */
+  percent: number;
+  /** Plain-language description of the current step, e.g. "Finding staff lines". */
+  stage: string;
+  done: boolean;
+}
+
 export interface ApiError {
   error: {
     code: "unsupported_type" | "file_too_large" | "engine_unavailable" | "recognition_failed" | "internal";

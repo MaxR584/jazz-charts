@@ -9,7 +9,7 @@ import type {
 import { buildMusicXML } from "../musicxml/builder.js";
 import { validateLeadSheet } from "../musicxml/validate.js";
 import type { PreparedInput } from "../pipeline/pages.js";
-import { EngineError, type ConversionEngine, type EngineResult } from "./types.js";
+import { EngineError, type ConversionEngine, type EngineResult, type ProgressFn } from "./types.js";
 
 export const DEFAULT_MODEL = "claude-opus-5-5";
 
@@ -346,11 +346,19 @@ export class ClaudeEngine implements ConversionEngine {
     return raw;
   }
 
-  async convert(input: PreparedInput): Promise<EngineResult> {
+  async convert(input: PreparedInput, onProgress?: ProgressFn): Promise<EngineResult> {
     if (!this.isAvailable() && !this.opts.client) {
       throw new EngineError("engine_unavailable", "ANTHROPIC_API_KEY is not set");
     }
-    const pages = await mapLimit(input.pages, this.concurrency, (png, i) => this.transcribePage(png, i, input.pages.length));
+    const total = input.pages.length;
+    let done = 0;
+    onProgress?.(0, total > 1 ? `Reading page 1 of ${total}` : "Reading the music");
+    const pages = await mapLimit(input.pages, this.concurrency, async (png, i) => {
+      const page = await this.transcribePage(png, i, total);
+      done++;
+      onProgress?.((done / total) * 85, done < total ? `Read ${done} of ${total} pages` : "Checking the transcription");
+      return page;
+    });
     const merged = mergePages(pages);
     let warnings = validateLeadSheet(merged.sheet);
 
@@ -362,6 +370,7 @@ export class ClaudeEngine implements ConversionEngine {
         }
       }
       if (bad.size === 0) break;
+      onProgress?.(90, `Re-checking ${bad.size} bar${bad.size > 1 ? "s" : ""}`);
       await this.repair(merged, input.pages, bad);
       warnings = validateLeadSheet(merged.sheet);
     }

@@ -7,10 +7,13 @@ export interface EngineResult {
   warnings: Warning[];
 }
 
+/** Called as recognition advances. percent is 0–100 for the engine's own work. */
+export type ProgressFn = (percent: number, stage: string) => void;
+
 export interface ConversionEngine {
   readonly name: Engine;
   isAvailable(): boolean;
-  convert(input: PreparedInput): Promise<EngineResult>;
+  convert(input: PreparedInput, onProgress?: ProgressFn): Promise<EngineResult>;
 }
 
 export class EngineError extends Error {
