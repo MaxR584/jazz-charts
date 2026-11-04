@@ -8,6 +8,7 @@ import { harmonyXml } from "../musicxml/builder.js";
 import { parseChordSymbol } from "../musicxml/chords.js";
 import { unzipMxl } from "../musicxml/mxl.js";
 import { validateMusicXML } from "../musicxml/validate.js";
+import type { Warning } from "../../../shared/types.js";
 import type { PreparedInput } from "../pipeline/pages.js";
 import { VENDOR_DIR } from "../paths.js";
 import { EngineError, type ConversionEngine, type EngineResult } from "./types.js";
@@ -56,6 +57,33 @@ export function audiverisEnv(bin: string): NodeJS.ProcessEnv {
   const tessdata = join(dirname(dirname(bin)), "tessdata");
   if (!env.TESSDATA_PREFIX && existsSync(join(tessdata, "eng.traineddata"))) env.TESSDATA_PREFIX = tessdata;
   return env;
+}
+
+/**
+ * Audiveris constants tuned for lead sheets (passed as `-option key=value`).
+ * Found by running Audiveris with DEBUG logging for org.audiveris.omr.text on the fixtures
+ * (docs/errors-backend.md #14). All are text-only except minContextualGrade.
+ */
+export const AUDIVERIS_CONSTANTS: readonly string[] = [
+  // Tesseract reads the small ♭ in "B♭m7" / "E♭7" correctly but with confidence ~0.53-0.59, under the
+  // default 0.65, so the whole word was dropped.
+  "org.audiveris.omr.text.tesseract.TesseractOCR.minConfidence=0.45",
+  // A chord name's grade is its OCR confidence × 0.8 (short sentences get no length boost), so those
+  // words then sat at ~0.43-0.47 and SigReducer removed them under the default 0.5.
+  "org.audiveris.omr.glyph.Grades.minContextualGrade=0.4",
+  // On screenshots the ♭ came out as "l>", "I>", "|>". Without these characters Tesseract picks "b".
+  "org.audiveris.omr.text.tesseract.TesseractOrder.blackList=<>|\\{}[]~",
+  // Text up to 7 interlines above the first staff counted as a direction, so a title close to the music
+  // ("Blue Lantern", ~6.6 interlines up) became a <words> above bar 1. Chord names sit at ~2-3.
+  "org.audiveris.omr.text.TextRole.maxStaffDy=5",
+  // Text ending within 2 interlines of the staff's right end was taken for the composer, which caught
+  // the last chord of the first system ("B♭7#11"). A real composer line is flush with the margin.
+  "org.audiveris.omr.text.TextRole.maxRightDx=0.25",
+];
+
+/** Command-line arguments for one Audiveris batch run. */
+export function audiverisArgs(outDir: string, inFile: string): string[] {
+  return ["-batch", ...AUDIVERIS_CONSTANTS.flatMap((c) => ["-option", c]), "-export", "-output", outDir, "--", inFile];
 }
 
 export function defaultAudiverisBin(): string {
@@ -131,7 +159,7 @@ export class AudiverisEngine implements ConversionEngine {
         inFile = join(dir, "score.png");
         await writeFile(inFile, await omrImage(input.original));
       }
-      const res = await this.runner(this.bin, ["-batch", "-export", "-output", out, "--", inFile], this.timeoutMs);
+      const res = await this.runner(this.bin, audiverisArgs(out, inFile), this.timeoutMs);
       const mxls = await findFiles(dir, /\.mxl$/i).catch(() => [] as string[]);
       if (mxls.length === 0) {
         const log = (res.stdout + "\n" + res.stderr).split("\n").filter((l) => /WARN|ERROR|Exception|killed/i.test(l)).slice(-5).join(" | ");
@@ -143,6 +171,15 @@ export class AudiverisEngine implements ConversionEngine {
       // One .mxl per movement (book.mvt1.mxl, ...). Lead sheets are a single movement.
       const xml = normalizeAudiverisXml(unzipMxl(await readFile(mxls[0]!)));
       const warnings = validateMusicXML(xml);
+      warnings.push(...unreadChordWarnings(xml), ...rehearsalWarnings(xml));
+      const dropped = droppedChordNames(res.stdout + "\n" + res.stderr);
+      if (dropped.length) {
+        warnings.push({
+          measure: null,
+          code: "other",
+          message: `Audiveris dropped chord symbol${dropped.length > 1 ? "s" : ""} ${dropped.join(", ")}: they had no note under them (slash bars, chords on rests or held notes). Add them with the chord editor.`,
+        });
+      }
       if (mxls.length > 1) {
         warnings.push({ measure: null, code: "other", message: `Audiveris split the score into ${mxls.length} movements; only the first is returned.` });
       }
@@ -151,6 +188,19 @@ export class AudiverisEngine implements ConversionEngine {
       await rm(dir, { recursive: true, force: true });
     }
   }
+}
+
+/**
+ * Chord names Audiveris read but did not export: a ChordNameInter must attach to a note/rest chord
+ * starting under it, otherwise it is removed with "No chord below ChordNameInter#… TEXT "C7" …".
+ * Single letters are skipped (usually a rehearsal mark read as a chord).
+ */
+export function droppedChordNames(log: string): string[] {
+  const out: string[] = [];
+  for (const m of log.matchAll(/No chord below ChordNameInter#\d+\{[^}\n]*?TEXT "([^"]+)"/g)) {
+    if (m[1]!.length > 1) out.push(m[1]!);
+  }
+  return out;
 }
 
 const tagText = (xml: string, tag: string): string | null => {
@@ -163,6 +213,20 @@ const acc = (alter: string | null) => {
 };
 const unescapeXml = (s: string) =>
   s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+
+/**
+ * Undo Tesseract's readings of a small ♭ right after the root ("Bl>maj7", "BI>7#11", "BLm7", "B|>7").
+ * Returns the repaired symbol only when it parses as a chord and the original doesn't.
+ */
+export function repairOcrChord(text: string): string | null {
+  const t = text.trim();
+  if (parseChordSymbol(t).ok) return null;
+  const m = /^([A-G])(?:[lI|1L]>|>|[lIL|](?=[a-z0-9#+°ø\/]|$))(.*)$/.exec(t);
+  if (!m) return null;
+  const fixed = `${m[1]}b${m[2]}`;
+  const r = parseChordSymbol(fixed);
+  return r.ok && r.chord.root ? fixed : null;
+}
 
 /**
  * Audiveris's chord-symbol OCR gets the text right more often than the kind
@@ -187,7 +251,8 @@ export function fixAudiverisHarmonies(xml: string): string {
   out = out.replace(
     /<direction(\s[^>]*)?>\s*<direction-type>\s*<words[^>]*>([^<]+)<\/words>\s*<\/direction-type>\s*(<offset[^>]*>[^<]*<\/offset>)?\s*(?:<staff>[^<]*<\/staff>)?\s*<\/direction>/g,
     (whole, attrs: string | undefined, words: string, offsetTag: string | undefined) => {
-      const textValue = unescapeXml(words).trim();
+      const raw = unescapeXml(words).trim();
+      const textValue = repairOcrChord(raw) ?? raw;
       // Require a suffix or slash bass so rehearsal letters ("A") and words don't become chords.
       if (!/^[A-G][#b♭♯]?\S+$/.test(textValue)) return whole;
       const r = parseChordSymbol(textValue);
@@ -201,10 +266,159 @@ export function fixAudiverisHarmonies(xml: string): string {
   return out;
 }
 
+const escapeXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const attrNum = (tag: string, name: string): number | null => {
+  const m = new RegExp(`\\b${name}="(-?[\\d.]+)"`).exec(tag);
+  return m ? Number(m[1]) : null;
+};
+const median = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b);
+  return s.length ? s[Math.floor(s.length / 2)]! : NaN;
+};
+/** Direction words that are never a title, even when printed large. */
+const NOT_A_TITLE = /^(fine|coda|to coda|d\.?\s?[cs]\.?.*|segno|swing|ballad|bossa.*|latin|medium.*|up tempo|fast|slow(ly)?|rit\.?.*|rall\.?.*|a tempo|solos?.*|intro|vamp.*|tacet|n\.?\s?c\.?)$/i;
+
+/**
+ * Give the score a <work-title> when Audiveris found the title but did not put it there:
+ * - it wrote <movement-title> (role Title): move it into <work><work-title> and mark the credit as the title;
+ * - it read a title printed close to the music as a <words> direction in the first system: when that text is
+ *   much larger than the chord symbols, roughly centred on the page and not a known direction, move it
+ *   to <work-title> and remove the direction.
+ */
+export function promoteTitle(xml: string): string {
+  if (/<work-title>\s*[^<\s]/.test(xml)) return xml;
+  const mt = /<movement-title>([^<]*)<\/movement-title>/.exec(xml)?.[1]?.trim();
+  // OSMD prints <movement-title> as a subtitle when there is a <work-title>, so move it rather than copy it.
+  if (mt) return setWorkTitle(xml.replace(/\s*<movement-title>[^<]*<\/movement-title>/, ""), unescapeXml(mt));
+
+  const partStart = xml.indexOf("<part id=");
+  if (partStart < 0) return xml;
+  // First system: from the first measure up to the first measure that starts a new system/page.
+  const measures = [...xml.slice(partStart).matchAll(/<measure\b[^>]*>[\s\S]*?<\/measure>/g)];
+  const firstSystem: { text: string; index: number; width: number }[] = [];
+  for (const [i, m] of measures.entries()) {
+    if (i > 0 && /<print\b[^>]*new-(system|page)="yes"/.test(m[0])) break;
+    firstSystem.push({ text: m[0], index: partStart + m.index!, width: attrNum(/<measure\b[^>]*>/.exec(m[0])![0], "width") ?? 0 });
+  }
+  const chordSizes = [...xml.matchAll(/<harmony\b[^>]*font-size="([\d.]+)"/g)].map((m) => Number(m[1]));
+  const chordSize = chordSizes.length ? median(chordSizes) : 10;
+  const pageWidth = Number(/<page-width>([\d.]+)<\/page-width>/.exec(xml)?.[1] ?? NaN);
+  const pageLeft = Number(/<page-margins[\s\S]*?<left-margin>([\d.]+)<\/left-margin>/.exec(xml)?.[1] ?? 0);
+  const sysLeft = Number(/<system-margins>\s*<left-margin>([\d.]+)<\/left-margin>/.exec(firstSystem[0]?.text ?? "")?.[1] ?? 0);
+  // Tenths per point, from <scaling> (millimeters per 40 tenths).
+  const mm = Number(/<millimeters>([\d.]+)<\/millimeters>/.exec(xml)?.[1] ?? NaN);
+  const tenths = Number(/<tenths>([\d.]+)<\/tenths>/.exec(xml)?.[1] ?? 40);
+  const tenthsPerPt = Number.isFinite(mm) && mm > 0 ? (25.4 / 72) * (tenths / mm) : 2;
+
+  let x0 = pageLeft + sysLeft;
+  for (const m of firstSystem) {
+    const re = /<direction\b[^>]*>\s*<direction-type>\s*(<words\b[^>]*>)([^<]+)<\/words>\s*<\/direction-type>[\s\S]*?<\/direction>\s*/g;
+    for (const d of m.text.matchAll(re)) {
+      const text = unescapeXml(d[2]!).trim();
+      const size = attrNum(d[1]!, "font-size");
+      if (!size || size < chordSize * 1.2 || !/[a-z]{2}/i.test(text) || NOT_A_TITLE.test(text)) continue;
+      if (parseChordSymbol(text).ok || repairOcrChord(text)) continue;
+      if (Number.isFinite(pageWidth)) {
+        // Anchor: the next note's default-x in this measure, plus the words' relative-x.
+        const after = m.text.slice(d.index! + d[0].length);
+        const noteX = attrNum(/<note\b[^>]*>/.exec(after)?.[0] ?? "", "default-x") ?? 0;
+        const left = x0 + noteX + (attrNum(d[1]!, "relative-x") ?? 0) + (attrNum(d[1]!, "default-x") ?? 0);
+        const centre = left + (text.length * size * 0.5 * tenthsPerPt) / 2;
+        if (Math.abs(centre - pageWidth / 2) > pageWidth * 0.2) continue;
+      }
+      const measure = m.text.slice(0, d.index!) + m.text.slice(d.index! + d[0].length);
+      const out = xml.slice(0, m.index) + measure + xml.slice(m.index + m.text.length);
+      return setWorkTitle(out, text);
+    }
+    x0 += m.width;
+  }
+  return xml;
+}
+
+function setWorkTitle(xml: string, title: string): string {
+  const t = escapeXml(title);
+  // Schema order: work, movement-number, movement-title, identification, defaults, credit*, part-list.
+  let out = xml.replace(/<work>\s*<\/work>|<work\/>/, "");
+  if (/<work>/.test(out)) out = out.replace(/<work>/, `<work><work-title>${t}</work-title>`);
+  else out = out.replace(/(<score-partwise\b[^>]*>)/, `$1\n  <work><work-title>${t}</work-title></work>`);
+  // Mark the credit that prints this text as the title (OSMD and MuseScore use it), or add one.
+  let marked = false;
+  out = out.replace(/<credit(\s[^>]*)?>(\s*)(?!<credit-type>)(<credit-words\b[^>]*>)([^<]*)<\/credit-words>/g, (whole, a = "", sp, cw, txt) => {
+    if (marked || unescapeXml(txt).trim() !== title) return whole;
+    marked = true;
+    return `<credit${a}>${sp}<credit-type>title</credit-type>${sp}${cw}${txt}</credit-words>`;
+  });
+  // No credit is added when there is none: <work-title> is what OSMD and MuseScore print, and OSMD would
+  // print an extra centred credit as a subtitle too.
+  return out;
+}
+
+/**
+ * <words> left in the chord row that look like a misread chord symbol ("vaaj7" for B♭maj7): one token with
+ * a digit, the same size as the chord symbols, that neither parses nor can be repaired.
+ */
+export function unreadChordWarnings(xml: string): Warning[] {
+  const harmonies = [...xml.matchAll(/<harmony\b[^>]*>/g)].map((m) => m[0]);
+  if (!harmonies.length) return [];
+  const rowY = median(harmonies.map((h) => attrNum(h, "default-y")).filter((y): y is number => y !== null));
+  const chordSize = median(harmonies.map((h) => attrNum(h, "font-size")).filter((y): y is number => y !== null));
+  // In the chord row: within 1 staff space (10 tenths) of the chord symbols' default-y, or, without
+  // positions, the same font size (OCR font sizes are unreliable: "vaaj7" came out at 12pt among 9pt chords).
+  const inChordRow = (attrs: string) => {
+    const y = attrNum(attrs, "default-y");
+    if (y !== null && Number.isFinite(rowY)) return Math.abs(y - rowY) <= 10;
+    const size = attrNum(attrs, "font-size");
+    return size !== null && Number.isFinite(chordSize) && Math.abs(size - chordSize) <= chordSize * 0.2;
+  };
+  const out: Warning[] = [];
+  for (const m of xml.matchAll(/<measure\b[^>]*\bnumber="([^"]*)"[^>]*>([\s\S]*?)<\/measure>/g)) {
+    for (const w of m[2]!.matchAll(/<words\b([^>]*)>([^<]+)<\/words>/g)) {
+      const text = unescapeXml(w[2]!).trim();
+      if (!/^[A-Za-z]\S*\d\S*$/.test(text) || !inChordRow(w[1]!)) continue;
+      if (parseChordSymbol(text).ok || repairOcrChord(text)) continue;
+      const n = Number.parseInt(m[1]!, 10);
+      out.push({
+        measure: Number.isNaN(n) ? null : n,
+        code: "unparsed_chord",
+        message: `"${text}" looks like a chord symbol that was misread; check this bar's chords.`,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Boxed rehearsal letters are OCR'd with the box (both "A" and "B" of the PNG fixture came out as "E").
+ * Lead sheets start at "A"; when single-letter marks don't, say so instead of guessing the letters.
+ */
+export function rehearsalWarnings(xml: string): Warning[] {
+  const marks: { measure: number | null; text: string }[] = [];
+  for (const m of xml.matchAll(/<measure\b[^>]*\bnumber="([^"]*)"[^>]*>([\s\S]*?)<\/measure>/g)) {
+    for (const r of m[2]!.matchAll(/<rehearsal\b[^>]*>([^<]*)<\/rehearsal>/g)) {
+      const n = Number.parseInt(m[1]!, 10);
+      marks.push({ measure: Number.isNaN(n) ? null : n, text: unescapeXml(r[1]!).trim() });
+    }
+  }
+  if (!marks.length || !marks.every((r) => /^[A-Z]$/.test(r.text)) || marks[0]!.text === "A") return [];
+  return [
+    {
+      measure: marks[0]!.measure,
+      code: "low_confidence",
+      message: `Rehearsal marks were read as ${marks.map((r) => r.text).join(", ")}; boxed letters are often misread. Check them.`,
+    },
+  ];
+}
+
 /** Make sure we hand out an uncompressed score-partwise string labelled 4.0. */
 export function normalizeAudiverisXml(xml: string): string {
   if (!/<score-partwise[\s>]/.test(xml)) {
     throw new EngineError("recognition_failed", "Audiveris output is not a score-partwise document");
   }
-  return fixAudiverisHarmonies(xml.replace(/<score-partwise([^>]*?)version="[^"]*"/, '<score-partwise$1version="4.0"'));
+  const out = xml
+    .replace(/<score-partwise([^>]*?)version="[^"]*"/, '<score-partwise$1version="4.0"')
+    .replace(/(-\/\/Recordare\/\/DTD MusicXML) 4\.0\.\d+ (Partwise)/, "$1 4.0 $2")
+    // Audiveris records the input path (our temp dir) in the file; don't hand it out.
+    .replace(/\s*<source>[^<]*<\/source>/, "")
+    .replace(/\s*<miscellaneous-field name="source-file">[^<]*<\/miscellaneous-field>/, "");
+  return promoteTitle(fixAudiverisHarmonies(out));
 }

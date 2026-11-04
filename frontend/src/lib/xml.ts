@@ -104,12 +104,15 @@ export function partMeasures(part: Element): Element[] {
   return children(part, "measure");
 }
 
+/** Title: <work-title>, else <movement-title>, else the title credit (the text OSMD draws), else "Untitled". */
 export function getTitle(doc: Document): string {
   const root = doc.documentElement;
   const work = child(root, "work");
+  const credit = children(root, "credit").find((c) => childText(c, "credit-type") === "title");
   return (
-    (work && childText(work, "work-title")) ||
-    childText(root, "movement-title") ||
+    (work && childText(work, "work-title")?.trim()) ||
+    childText(root, "movement-title")?.trim() ||
+    (credit && childText(credit, "credit-words")?.trim()) ||
     "Untitled"
   );
 }

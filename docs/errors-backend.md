@@ -28,7 +28,7 @@ Problems found while building `server/`, and how each was resolved.
 ## 5. Audiveris chord kinds wrong or missing
 - **Symptom:** `Em7b5` exported as `<kind text="m7b5">minor-seventh</kind>` + b5 degree. `D7alt` exported as `<words>`. Every flat-rooted chord (B♭maj7, E♭7, B♭7#11, B♭m7) and `F6/9` missing.
 - **Cause:** Audiveris's chord-name grammar and its OCR. The flat glyph in chord roots isn't read.
-- **Fix/workaround:** `fixAudiverisHarmonies()` re-parses each harmony's displayed text with our parser and converts `<words>` that are clearly chord symbols into `<harmony>`. This raised chord F1 to 0.84 (PDF) / 0.86 (PNG). Flat-rooted chords are still lost, so use the Claude engine for chord-heavy charts.
+- **Fix/workaround:** `fixAudiverisHarmonies()` re-parses each harmony's displayed text with our parser and converts `<words>` that are clearly chord symbols into `<harmony>`. This raised chord F1 to 0.84 (PDF) / 0.86 (PNG). Flat-rooted chords were still lost here; fixed by OCR tuning in #14.
 
 ## 6. Audiveris output version
 - **Symptom:** `<score-partwise version="4.0.3">`, DOCTYPE `MusicXML 4.0.3`.
@@ -64,3 +64,37 @@ Problems found while building `server/`, and how each was resolved.
 - **Result:** `pip install homr==0.7.0` works on Python 3.13 (requires 3.11–3.15). The venv is about 400 MB (onnxruntime, opencv, rapidocr), and models download on first run. On `fixtures/sample-1.png` it took 19 s on CPU: 17/17 measures, pitch F1 1.00, note+duration F1 0.957, and **chord F1 0**. It has no chord-symbol support and took the first chord ("Fmaj7") as the title. It also read the tie as a slur, dropped the endings, and turned the slash bar into rests.
 - **Conclusion:** homr is viable as an offline melody reader, but it adds no value over Audiveris for lead sheets because chord symbols are the main content. Not integrated.
 - **Source:** https://pypi.org/project/homr/, https://github.com/liebharc/homr
+
+## 14. Audiveris lost flat-root chords and read the title as a direction
+- **Symptom:** on `fixtures/sample-1.{png,pdf}` chord F1 was 0.863 / 0.84. B♭maj7, B♭m7, E♭7 and B♭7#11 were missing. On the PDF, "Blue Lantern" became a `<words>` direction above bar 2, so the score had no title ("Untitled Score", with the title text on top of the chords).
+- **Investigation:** I ran `bin/Audiveris -batch -export` directly, unzipped the `.omr` (`sheet#N/sheet#N.xml`: `<sentence role=…>` and `<chord-name value=…>`), and enabled DEBUG for `org.audiveris.omr.text` and `org.audiveris.omr.sig` with a `-Dlogback.configurationFile`. I read the constants with `javap -c -p` on `lib/app/audiveris.jar`.
+  - **PDF:** Tesseract reads the flat correctly (`"Bb7#11" conf:0.53`, `"Bbm7" 0.54`, `"Eb7" 0.59`), but under `TesseractOCR.minConfidence` (0.65), so the words were dropped. With that threshold lowered, `SigReducer` still removed them. A chord name's grade is confidence × `Grades.intrinsicRatio` (0.8) = 0.43-0.47, which is under `Grades.minContextualGrade` (0.5). `TextLine.sentenceLowerLength` (10 chars) is too long to boost a chord name.
+  - **PNG (upscaled screenshot):** the ♭ came out as `l>`, `I>` or `L` ("Bl>maj7", "BI>7#11", "BLm7"). The chord grammar (`ChordNameInter`, roots `[A-G][b♭#♯]?`, degrees 5/6/7/9/11/13 only, so not `6/9` or `alt`) rejects these, and they became Direction or even CreatorComposer text.
+  - **Roles (`TextRole.guess`):** "B♭7#11" ended 9 px from the staff's right end, inside `maxRightDx` (2 interlines), so it was taken for the composer. The title was ~6.6 interlines above the staff, inside `maxStaffDy` (7), so it counted as a direction.
+- **Fix:**
+  - `AUDIVERIS_CONSTANTS` in `server/src/engines/audiveris.ts`, passed as `-option key=value`:
+    - `TesseractOCR.minConfidence=0.45`
+    - `Grades.minContextualGrade=0.4`
+    - `TesseractOrder.blackList=<>|\{}[]~` (Tesseract then reads ♭ as `b`)
+    - `TextRole.maxStaffDy=5` (title becomes role Title → `<movement-title>`)
+    - `TextRole.maxRightDx=0.25`
+  - Post-processing:
+    - `repairOcrChord()` turns `Bl>maj7` / `BI>7#11` / `BLm7` into B♭ chords when converting `<words>`.
+    - `promoteTitle()` moves `<movement-title>` to `<work><work-title>` (OSMD would otherwise print it again as a subtitle) and marks the matching credit `credit-type=title`. When Audiveris left the title as a direction, it promotes large (≥1.2× chord size), roughly centred `<words>` in the first system that aren't a known direction to `<work-title>`. It adds no credit, because OSMD prints an extra centred credit as a subtitle.
+    - New warnings:
+      - chord names Audiveris logged as `No chord below ChordNameInter … TEXT "C7"`;
+      - chord-row words that look like a misread chord ("vaaj7" for B♭maj7 on the PDF, `unparsed_chord` with the bar);
+      - single-letter rehearsal marks that don't start at A (the PNG's boxed A/B are read as "E" now that their grade passes 0.4).
+    - The server temp path in `<source>` / `source-file` is removed, and the DOCTYPE is relabelled 4.0.
+  - Tests use a real raw Audiveris output, `fixtures/audiveris-raw-sample-1-pdf.xml` (XSD-checked after post-processing).
+- **Result (`npm run eval:audiveris`):**
+  - **PDF:** chord F1 0.84 → **0.906**. Notes 0.991, pitches 1.0 (unchanged).
+  - **PNG:** chord F1 0.863 → **0.945**. Notes 0.982 → 0.991, pitches 0.99 → 1.0.
+  - Both get `<work-title>Blue Lantern</work-title>`.
+  - The real-run test now requires chord F1 > 0.88 and Bb7, Bbm7, Eb7 present.
+- **Still open:**
+  - Audiveris removes a chord name with no note or rest starting under it: m8 beat 3 (C7 over a held half note) and the slash bar m13 (Gm7, C7). These now get a warning.
+  - On the 300-dpi PDF, B♭maj7 is still read as "vaaj7" (warned). At `ImageLoading.pdfResolution=400` it is read correctly, but E♭7 becomes "EW" and "Am7 D7alt" merges into one direction, so the resolution stays at 300.
+  - The PDF's page-2 Am7 (m12) is not OCR'd.
+  - The rehearsal marks in the PNG are read as "E".
+- **Sources:** Audiveris 5.11 jar (`TesseractOCR$Constants`, `TesseractOrder$Constants`, `TextLine.getGrade`, `TextRole.guess`, `glyph.Grades$Constants`, `ChordNameInter`); Audiveris handbook, CLI `-option`: https://audiveris.github.io/audiveris/_pages/reference/advanced/cli/ ; OCR languages: https://audiveris.github.io/audiveris/_pages/install/languages/ ; Tesseract `tessedit_char_blacklist`: https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html

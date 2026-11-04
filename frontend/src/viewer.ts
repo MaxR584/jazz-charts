@@ -9,6 +9,10 @@ import {
   type VexFlowGraphicalNote,
 } from "opensheetmusicdisplay";
 import { noteKey } from "./lib/xml";
+import { installChordTextPatch } from "./lib/osmd-chords";
+
+// Print chord symbols as written (kind/@text), e.g. C7sus4, D7alt, F6/9 — not OSMD's Csus4(b7).
+installChordTextPatch();
 
 /** OSMD's default key mapping spells +6 from C as F#. This keeps the key signature spelling the app chose
  *  (Gb, Db…), and IntervalTransposeCalculator derives its letter steps from it, so notes follow. */
