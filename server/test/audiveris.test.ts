@@ -227,3 +227,22 @@ describe.skipIf(!real.isAvailable())("Audiveris (installed) on the fixtures", ()
     });
   }
 });
+
+describe("Audiveris install locations", () => {
+  it("looks in the usual Windows folders", async () => {
+    const { audiverisBinCandidates } = await import("../src/engines/audiveris.js");
+    const c = audiverisBinCandidates("win32", {
+      ProgramFiles: "C:\\Program Files",
+      LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local",
+      USERPROFILE: "C:\\Users\\u",
+    }).map((p) => p.replace(/\\/g, "/"));
+    expect(c).toContain("C:/Program Files/Audiveris/Audiveris.exe");
+    expect(c).toContain("C:/Users/u/AppData/Local/Programs/Audiveris/Audiveris.exe");
+    expect(c).toContain("C:/Users/u/scoop/apps/audiveris/current/Audiveris.exe");
+  });
+
+  it("uses the vendor launcher on Linux", async () => {
+    const { audiverisBinCandidates } = await import("../src/engines/audiveris.js");
+    expect(audiverisBinCandidates("linux", {})[0]).toMatch(/vendor\/audiveris\/bin\/Audiveris$/);
+  });
+});

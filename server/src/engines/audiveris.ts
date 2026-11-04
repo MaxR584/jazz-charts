@@ -54,8 +54,12 @@ export function audiverisEnv(bin: string): NodeJS.ProcessEnv {
     ...process.env,
     JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS ?? ""} -Djava.awt.headless=true`.trim(),
   };
-  const tessdata = join(dirname(dirname(bin)), "tessdata");
-  if (!env.TESSDATA_PREFIX && existsSync(join(tessdata, "eng.traineddata"))) env.TESSDATA_PREFIX = tessdata;
+  if (!env.TESSDATA_PREFIX) {
+    // Linux vendor install keeps tessdata next to bin/; the Windows script puts it in vendor/tessdata.
+    const candidates = [join(dirname(dirname(bin)), "tessdata"), join(dirname(bin), "tessdata"), join(VENDOR_DIR, "tessdata")];
+    const found = candidates.find((d) => existsSync(join(d, "eng.traineddata")));
+    if (found) env.TESSDATA_PREFIX = found;
+  }
   return env;
 }
 
@@ -86,8 +90,24 @@ export function audiverisArgs(outDir: string, inFile: string): string[] {
   return ["-batch", ...AUDIVERIS_CONSTANTS.flatMap((c) => ["-option", c]), "-export", "-output", outDir, "--", inFile];
 }
 
+/** Where Audiveris is usually installed. The first that exists wins; AUDIVERIS_BIN overrides. */
+export function audiverisBinCandidates(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
+  if (platform !== "win32") return [join(VENDOR_DIR, "audiveris", "bin", "Audiveris")];
+  const roots = [
+    env.ProgramFiles ?? "C:\\Program Files",
+    env.LOCALAPPDATA && join(env.LOCALAPPDATA, "Programs"),
+    env.USERPROFILE && join(env.USERPROFILE, "scoop", "apps", "audiveris", "current"),
+  ].filter(Boolean) as string[];
+  return [
+    join(VENDOR_DIR, "audiveris", "Audiveris.exe"),
+    ...roots.flatMap((r) => (r.endsWith("current") ? [join(r, "Audiveris.exe")] : [join(r, "Audiveris", "Audiveris.exe")])),
+  ];
+}
+
 export function defaultAudiverisBin(): string {
-  return process.env.AUDIVERIS_BIN ?? join(VENDOR_DIR, "audiveris", "bin", "Audiveris");
+  if (process.env.AUDIVERIS_BIN) return process.env.AUDIVERIS_BIN;
+  const candidates = audiverisBinCandidates();
+  return candidates.find((c) => existsSync(c)) ?? candidates[0];
 }
 
 async function findFiles(dir: string, re: RegExp): Promise<string[]> {

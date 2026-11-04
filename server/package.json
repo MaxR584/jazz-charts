@@ -10,7 +10,8 @@
     "test": "vitest run",
     "fixtures": "tsx scripts/render-fixtures.ts",
     "install-audiveris": "bash scripts/install-audiveris.sh",
-    "eval:audiveris": "tsx scripts/eval-audiveris.ts"
+    "eval:audiveris": "tsx scripts/eval-audiveris.ts",
+    "install-audiveris:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-audiveris.ps1"
   },
   "engines": {
     "node": ">=20"
@@ -21,6 +22,7 @@
     "fast-xml-parser": "5.12.0",
     "fastify": "5.12.8",
     "fflate": "0.8.3",
+    "mupdf": "1.28.1",
     "sharp": "0.35.5"
   },
   "devDependencies": {

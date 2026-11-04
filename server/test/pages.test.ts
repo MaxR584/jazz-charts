@@ -47,7 +47,7 @@ describe("PDF splitting", () => {
     expect(pages).toHaveLength(1);
   });
 
-  it("keeps page order past 9 pages (pdftoppm zero-pads page-01.png …)", async () => {
+  it("keeps page order past 9 pages", async () => {
     // 12 pages alternating fixture page 1 / page 2, joined with pdfunite.
     const dir = mkdtempSync(join(tmpdir(), "jc-unite-"));
     try {

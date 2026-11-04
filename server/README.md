@@ -27,17 +27,17 @@ curl -F file=@../fixtures/sample-1.pdf -F engine=audiveris localhost:3001/api/co
 | `ANTHROPIC_API_KEY` | – | Enables the `claude` engine (and makes it the `auto` choice) |
 | `CLAUDE_MODEL` | `claude-opus-5-5` | Vision model for the `claude` engine |
 | `CLAUDE_EFFORT` | `high` | `low` … `max` |
-| `AUDIVERIS_BIN` | `vendor/audiveris/bin/Audiveris` | Audiveris launcher |
+| `AUDIVERIS_BIN` | Linux: `vendor/audiveris/bin/Audiveris`; Windows: first found of `vendor\audiveris\Audiveris.exe`, `%ProgramFiles%\Audiveris\Audiveris.exe`, `%LOCALAPPDATA%\Programs\Audiveris\Audiveris.exe`, Scoop | Audiveris launcher |
 | `AUDIVERIS_TIMEOUT_MS` | `300000` | Kill Audiveris after this long |
-| `TESSDATA_PREFIX` | `vendor/audiveris/tessdata` if present | OCR languages for Audiveris |
+| `TESSDATA_PREFIX` | `vendor/audiveris/tessdata` or `vendor/tessdata`, if present | OCR languages for Audiveris |
 | `MAX_PDF_PAGES` | `20` | Pages rasterized per PDF (extra pages produce a warning) |
 | `FIXTURES_DIR` | `../fixtures` | Where the `mock` engine reads `sample-1.json` |
 
-System tools: `pdftoppm` and `pdfinfo` (poppler-utils) for PDFs. Tests also need `xmllint`.
+PDFs are rendered with MuPDF (the `mupdf` npm package, WebAssembly), so no system tools are needed on any OS. Tests also need `xmllint`.
 
 ## Engines
 
-`engine=auto` (default) uses `claude` if `ANTHROPIC_API_KEY` is set, else `audiveris` if it's installed, else `mock`.
+`engine=auto` (default) uses `claude` if `ANTHROPIC_API_KEY` is set, else `audiveris` if it's installed. It never falls back to `mock`; with neither engine it returns `503 engine_unavailable`.
 
 - **claude**: each page image goes to Claude with a JSON schema (structured outputs via
   `output_config.format`). The model returns a `LeadSheet` transcription. Pages are
@@ -50,6 +50,19 @@ System tools: `pdftoppm` and `pdfinfo` (poppler-utils) for PDFs. Tests also need
 - **mock**: returns `fixtures/sample-1.json` built to MusicXML, whatever you upload.
 
 ### Install Audiveris
+
+**Windows** (PowerShell, from `server/`):
+
+```powershell
+npm.cmd run install-audiveris:windows
+```
+
+This installs Audiveris with winget (or tells you to download the `.msi` from
+https://github.com/Audiveris/audiveris/releases/latest) and downloads `eng.traineddata` into
+`server\vendor\tessdata`. The installer bundles Java. The server finds Audiveris in its default
+install folder; set `AUDIVERIS_BIN` if you put it elsewhere.
+
+**Linux:**
 
 ```bash
 npm run install-audiveris        # = bash scripts/install-audiveris.sh [version]

@@ -26,7 +26,7 @@ In dev, Vite proxies `/api/*` to `http://localhost:3001`.
 `multipart/form-data`:
 - `file` (required): `image/png`, `image/jpeg`, `image/webp` or `application/pdf`. Max 20 MB.
 - `engine` (optional): `auto` (default) | `claude` | `audiveris` | `mock`.
-  `auto` = claude if `ANTHROPIC_API_KEY` is set, else audiveris if installed, else mock.
+  `auto` = claude if `ANTHROPIC_API_KEY` is set, else audiveris if installed. Never mock (it always returns the sample); with neither, `503 engine_unavailable`.
 
 Response `200`: `ConvertResponse` (see `shared/types.ts`).
 Errors: `4xx/5xx` with `{ "error": { "code": string, "message": string } }`.
@@ -45,7 +45,7 @@ score, save charts locally (IndexedDB). Also allow opening an existing
 `.musicxml`/`.mxl` file directly without the server.
 
 ## Backend responsibilities
-`/api/convert` pipeline: PDF → page images (pdftoppm is installed) → engine →
+`/api/convert` pipeline: PDF → page images (MuPDF) → engine →
 MusicXML. Engines: Claude vision (JSON transcription → code-built MusicXML),
 Audiveris (offline, PDFs/images → .mxl → unzip), mock (returns a fixture). Validation
 (`warnings`). Tests and fixtures.
