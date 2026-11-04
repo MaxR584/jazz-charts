@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Jazz Charts</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%8E%B7%3C/text%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">♭</span>
+        <span>Jazz Charts</span>
+      </div>
+      <nav class="top-actions">
+        <button id="btn-upload" class="btn primary" type="button" title="Convert a screenshot or PDF">Upload</button>
+        <button id="btn-open" class="btn" type="button" title="Open a .musicxml / .xml / .mxl file">Open MusicXML</button>
+        <button id="btn-sample" class="btn" type="button">Load sample</button>
+        <button id="btn-library" class="btn" type="button">My charts</button>
+        <button id="server-pill" class="pill" type="button" title="Server status — click to re-check">
+          <span class="dot"></span><span class="pill-text">Checking server…</span>
+        </button>
+      </nav>
+      <input id="file-image" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" hidden />
+      <input id="file-xml" type="file" accept=".musicxml,.xml,.mxl,application/vnd.recordare.musicxml+xml,application/vnd.recordare.musicxml" hidden />
+    </header>
+
+    <main class="layout">
+      <section id="upload-panel" class="panel upload">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choose an image or PDF of a lead sheet">
+          <div class="dz-icon" aria-hidden="true">𝄞</div>
+          <p class="dz-title">Drop a lead sheet screenshot or PDF here</p>
+          <p class="dz-sub">or <u>choose a file</u>, or paste an image with <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>V</kbd> · PNG, JPEG, WebP, PDF · max 20 MB</p>
+        </div>
+        <div class="upload-row">
+          <label class="field">
+            <span>Engine</span>
+            <select id="engine">
+              <option value="auto">Auto</option>
+              <option value="claude">Claude (vision)</option>
+              <option value="audiveris">Audiveris (offline OMR)</option>
+              <option value="mock">Mock (test fixture)</option>
+            </select>
+          </label>
+          <p id="engine-note" class="muted small"></p>
+        </div>
+        <div id="progress" class="progress" hidden>
+          <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+          <div class="progress-row">
+            <span id="progress-text">Uploading…</span>
+            <button id="btn-cancel" class="btn small ghost" type="button">Cancel</button>
+          </div>
+        </div>
+      </section>
+
+      <div id="error" class="banner error" role="alert" hidden>
+        <span id="error-text"></span>
+        <button id="error-close" class="btn small ghost" type="button" aria-label="Dismiss">✕</button>
+      </div>
+      <div id="info" class="banner info" role="status" hidden></div>
+
+      <section id="workspace" class="workspace" hidden>
+        <div class="toolbar panel">
+          <div class="tb-group title-group">
+            <input id="title" class="title-input" aria-label="Chart title" />
+          </div>
+          <div class="tb-group">
+            <label class="field compact">
+              <span>Concert key</span>
+              <select id="key-select" aria-label="Concert key"></select>
+            </label>
+            <div class="stepper" role="group" aria-label="Transpose by semitone">
+              <button id="semi-down" class="btn icon" type="button" title="Down a semitone">−½</button>
+              <button id="semi-up" class="btn icon" type="button" title="Up a semitone">+½</button>
+            </div>
+            <div class="stepper" role="group" aria-label="Octave">
+              <button id="oct-down" class="btn icon" type="button" title="Octave down">8vb</button>
+              <span id="oct-label" class="oct-label">0</span>
+              <button id="oct-up" class="btn icon" type="button" title="Octave up">8va</button>
+            </div>
+            <label class="field compact">
+              <span>Instrument</span>
+              <select id="instrument" aria-label="Instrument"></select>
+            </label>
+          </div>
+          <div class="tb-group">
+            <span id="written-key" class="written-key"></span>
+            <button id="btn-reset" class="btn small ghost" type="button" title="Back to original key">Reset</button>
+          </div>
+          <div class="tb-group right">
+            <button id="btn-undo" class="btn icon" type="button" title="Undo (Ctrl+Z)" disabled>↶</button>
+            <button id="btn-redo" class="btn icon" type="button" title="Redo (Ctrl+Shift+Z)" disabled>↷</button>
+            <button id="btn-save" class="btn" type="button">Save</button>
+            <button id="btn-download" class="btn primary" type="button" title="Download the transposed, edited MusicXML">Download .musicxml</button>
+            <button id="btn-download-concert" class="btn small ghost" type="button" title="Download the edited chart at the original concert key">Concert .musicxml</button>
+          </div>
+        </div>
+
+        <div id="meta" class="meta muted small"></div>
+
+        <details id="warnings" class="panel warnings" open hidden>
+          <summary><span id="warnings-title">Warnings</span></summary>
+          <ul id="warnings-list"></ul>
+        </details>
+
+        <p class="hint muted small">Tip: click a chord symbol or a bar to edit chords · click a note, then use ↑/↓ to change its pitch, ←/→ to move.</p>
+
+        <div id="score-wrap" class="score-wrap">
+          <div id="score" class="score"></div>
+        </div>
+      </section>
+
+      <section id="empty" class="empty">
+        <p>Convert a lead sheet image, open a MusicXML file, or try the <button id="btn-sample2" class="linklike" type="button">sample chart</button>.</p>
+      </section>
+    </main>
+
+    <aside id="editor" class="editor panel" hidden aria-live="polite">
+      <div class="editor-head">
+        <strong id="editor-title">Bar</strong>
+        <button id="editor-close" class="btn small ghost" type="button" aria-label="Close editor">✕</button>
+      </div>
+      <div id="editor-body"></div>
+    </aside>
+
+    <dialog id="library" class="library">
+      <form method="dialog" class="library-head">
+        <strong>My charts</strong>
+        <button class="btn small ghost" value="close" aria-label="Close">✕</button>
+      </form>
+      <ul id="library-list"></ul>
+      <p id="library-empty" class="muted small" hidden>No saved charts yet. Use “Save” on a chart to keep it in this browser.</p>
+    </dialog>
+
+    <div id="drop-overlay" class="drop-overlay" hidden><div>Drop to open</div></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

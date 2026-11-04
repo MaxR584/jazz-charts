@@ -1,0 +1,1 @@
+Source: https://github.com/w3c/musicxml tag v4.0 (commit 799e2defb2ece0ae7bafe08dcbcac25b2c631d53), schema/. Imports rewritten to local xml.xsd / xlink.xsd for offline xmllint.

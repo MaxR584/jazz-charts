@@ -1,0 +1,33 @@
+{
+  "name": "jazz-charts-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "fixtures": "tsx scripts/render-fixtures.ts",
+    "install-audiveris": "bash scripts/install-audiveris.sh",
+    "eval:audiveris": "tsx scripts/eval-audiveris.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.4.0",
+    "@fastify/multipart": "10.1.7",
+    "fast-xml-parser": "5.12.0",
+    "fastify": "5.12.8",
+    "fflate": "0.8.3",
+    "sharp": "0.35.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "verovio": "6.4.1",
+    "vitest": "5.1.0"
+  }
+}
