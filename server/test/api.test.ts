@@ -54,10 +54,10 @@ describe("API", () => {
     expect(res.json<ConvertResponse>().pages).toBe(2);
   });
 
-  it("auto falls back to mock when nothing else is available", async () => {
+  it("auto does not fall back to mock; it explains how to set up an engine", async () => {
     const res = await convert({}, png);
-    expect(res.statusCode).toBe(200);
-    expect(res.json<ConvertResponse>().engine).toBe("mock");
+    expect(res.statusCode).toBe(503);
+    expect(res.json<ApiError>().error).toMatchObject({ code: "engine_unavailable", message: expect.stringContaining("ANTHROPIC_API_KEY") });
   });
 
   it("accepts the engine field after the file", async () => {
@@ -123,7 +123,8 @@ describe("API engine selection and errors", () => {
     const mock = new MockEngine();
     expect(resolveEngine("auto", { claude: stub("claude", true), audiveris: stub("audiveris", true), mock })?.name).toBe("claude");
     expect(resolveEngine("auto", { claude: stub("claude", false), audiveris: stub("audiveris", true), mock })?.name).toBe("audiveris");
-    expect(resolveEngine("auto", { ...offline, mock })?.name).toBe("mock");
+    expect(resolveEngine("auto", { ...offline, mock })).toBeNull(); // auto never falls back to the sample
+    expect(resolveEngine("mock", { ...offline, mock })?.name).toBe("mock");
     expect(resolveEngine("claude", { ...offline, mock })).toBeNull();
   });
 

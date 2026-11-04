@@ -125,8 +125,14 @@ function updateEngineSelect(): void {
     note.className = "small warn-text";
   } else {
     const on = (Object.keys(engines) as Engine[]).filter((e) => engines![e]);
-    note.textContent = `Available: ${on.join(", ") || "none"}. Auto picks Claude, then Audiveris, then mock.`;
-    note.className = "muted small";
+    if (!engines.claude && !engines.audiveris) {
+      note.textContent =
+        "No recognition engine is set up, so your own files can't be read yet. Set ANTHROPIC_API_KEY before starting the server, or install Audiveris. (The mock engine only returns the sample.)";
+      note.className = "small warn-text";
+    } else {
+      note.textContent = `Available: ${on.join(", ")}. Auto picks Claude, then Audiveris. Mock only returns the sample.`;
+      note.className = "muted small";
+    }
   }
 }
 $("server-pill").addEventListener("click", () => void checkHealth());

@@ -27,10 +27,11 @@ function sendError(reply: FastifyReply, status: number, code: ErrorCode, message
 
 const ENGINE_CHOICES: EngineChoice[] = ["auto", "claude", "audiveris", "mock"];
 
-/** `auto` = claude if ANTHROPIC_API_KEY is set, else audiveris if installed, else mock. */
+/** `auto` = claude if ANTHROPIC_API_KEY is set, else audiveris if installed. Never mock:
+ * mock always returns the sample, which looks like a wrong answer for the user's own file. */
 export function resolveEngine(choice: EngineChoice, engines: Engines): ConversionEngine | null {
   if (choice === "auto") {
-    for (const name of ["claude", "audiveris", "mock"] as const) {
+    for (const name of ["claude", "audiveris"] as const) {
       if (engines[name].isAvailable()) return engines[name];
     }
     return null;
@@ -108,7 +109,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     const engine = resolveEngine(choice, engines);
     if (!engine) {
       const why =
-        choice === "claude" ? "ANTHROPIC_API_KEY is not set" : choice === "audiveris" ? "Audiveris is not installed (scripts/install-audiveris.sh)" : "no engine available";
+        choice === "claude" ? "ANTHROPIC_API_KEY is not set" : choice === "audiveris" ? "Audiveris is not installed (scripts/install-audiveris.sh)" : "no recognition engine is set up. Set ANTHROPIC_API_KEY before starting the server, or install Audiveris (see server/README.md)";
       return sendError(reply, 503, "engine_unavailable", `Engine "${choice}" is unavailable: ${why}`);
     }
 

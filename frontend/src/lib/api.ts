@@ -17,7 +17,7 @@ export class ApiFailure extends Error {
 const FRIENDLY: Record<string, string> = {
   unsupported_type: "That file type isn't supported. Use PNG, JPEG, WebP or PDF.",
   file_too_large: "That file is too large (max 20 MB).",
-  engine_unavailable: "The selected recognition engine isn't available on the server.",
+  engine_unavailable: "No recognition engine is available to read this file.",
   recognition_failed: "The server couldn't read music from that image.",
   internal: "The server hit an internal error.",
 };
